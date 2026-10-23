@@ -4,45 +4,26 @@ import hello.itemservice.repository.ItemRepository;
 import hello.itemservice.repository.ItemSearchCond;
 import hello.itemservice.repository.ItemUpdateDto;
 import hello.itemservice.repository.memory.MemoryItemRepository;
-import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.ApplicationContext;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Slf4j
 @SpringBootTest
 class ItemRepositoryTest {
 
     @Autowired
     ItemRepository itemRepository;
 
-    @Autowired
-    ApplicationContext applicationContext;
-
-
-    /**
-     * 테스트는 서로 영향을 주면 안되므로, 각각의 테스트가 끝나고 나면 저장한 데이터를 제거해야 한다.
-     * 인터페이스에는 clearStore()가 없기 때문에 MemoryItemRepository인 경우에만 다운 캐스팅을 해서 데이터를 초기화 한다.
-     */
     @AfterEach
     void afterEach() {
         //MemoryItemRepository 의 경우 제한적으로 사용
         if (itemRepository instanceof MemoryItemRepository) {
             ((MemoryItemRepository) itemRepository).clearStore();
-        }
-    }
-
-    @Test
-    void applicationContext() {
-        String[] beanDefinitionNames = applicationContext.getBeanDefinitionNames();
-        for (String beanDefinitionName : beanDefinitionNames) {
-            log.info("beanDefinitionName = {}", beanDefinitionName);
         }
     }
 
@@ -106,6 +87,6 @@ class ItemRepositoryTest {
 
     void test(String itemName, Integer maxPrice, Item... items) {
         List<Item> result = itemRepository.findAll(new ItemSearchCond(itemName, maxPrice));
-        assertThat(result).containsExactly(items); // 해당 아이템들의 포함 여부 뿐만 아니라 순서까지 체크한다.
+        assertThat(result).containsExactly(items);
     }
 }
