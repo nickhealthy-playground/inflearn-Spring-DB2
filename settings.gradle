@@ -1,1 +1,4 @@
-rootProject.name = 'itemservice-db'
+// 강의 프로젝트를 독립 빌드로 유지하면서 루트 하나로 IDE·CLI에서 함께 다루기 위해 composite build 사용
+rootProject.name = 'spring-db2'
+
+includeBuild 'itemservice-db'
