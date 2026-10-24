@@ -5,8 +5,9 @@
 ## Stack
 
 - 구조: 루트 composite build (`settings.gradle`의 `includeBuild`)
-  - `itemservice-db/`: 섹션 1~8 (데이터 접근 기술: JdbcTemplate, MyBatis, JPA, Spring Data JPA, Querydsl)
-  - `springtx/`: 섹션 9~11 (스프링 트랜잭션 이해, 전파)
+  - 섹션 번호는 인프런 커리큘럼 기준 (섹션 1 = 강의 소개, 교안 PDF 번호 + 1)
+  - `itemservice-db/`: 섹션 2~9 (데이터 접근 기술: 시작, JdbcTemplate, 테스트, MyBatis, JPA, Spring Data JPA, Querydsl, 활용 방안)
+  - `springtx/`: 섹션 10~12 (스프링 트랜잭션 이해, 전파)
 - Java 11 (`sourceCompatibility`), 로컬 실행 JDK 17
 - Spring Boot 2.6.5, io.spring.dependency-management 1.0.11.RELEASE
 - Gradle 7.4.1 (루트 wrapper 하나만 사용, 하위 프로젝트에는 wrapper 없음)
