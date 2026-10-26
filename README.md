@@ -8,6 +8,7 @@
 
 * 섹션 3 | 데이터 접근 기술 - 스프링 JdbcTemplate
 * 섹션 4 | 데이터 접근 기술 - 테스트
+* 섹션 5 | 데이터 접근 기술 - MyBatis
 
 
 
@@ -203,5 +204,136 @@ logging.level.org.springframework.jdbc=debug
 | `schema.sql` 위치·이름 | 클래스패스 루트의 `schema.sql` (또는 `schema-${platform}.sql`) 을 찾는다. 테스트 전용이면 `src/test/resources` 에 둔다 |
 | 같은 DB를 공유하는 테스트 | 테스트 전용 DB라도 롤백 없이 데이터를 남기면 다른 테스트·다음 실행에 영향 → `findItems()` 처럼 전체 조회 결과를 검증하는 테스트가 먼저 깨진다 |
 | 임베디드 DB 수명 | 애플리케이션(JVM)이 종료되면 데이터와 DB가 함께 사라짐. 직접 URL을 쓸 때 `DB_CLOSE_DELAY=-1` 이 없으면 마지막 커넥션이 닫히는 순간 DB가 사라진다 |
+
+</details>
+
+
+
+# 섹션 5 | 데이터 접근 기술 - MyBatis
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> SQL을 XML(또는 애노테이션)에 작성하고, 매퍼 인터페이스 메서드를 호출하면 그 SQL을 실행해주는 SQL Mapper.
+> JdbcTemplate의 기능에 더해 **동적 쿼리**와 **여러 줄 SQL**을 편하게 작성할 수 있다. 대신 의존성과 약간의 설정이 필요하다.
+> (사용 버전: `mybatis-spring-boot-starter 2.2.0` → mybatis 3.5.7, mybatis-spring 2.0.6. 스프링 부트가 버전을 관리하지 않아 버전을 직접 적는다)
+
+### 한눈에 보기
+
+| 구분 | API / 설정 | 핵심 |
+|---|---|---|
+| 매퍼 | `@Mapper` 인터페이스 | 메서드 하나 = SQL 하나. 구현체는 직접 만들지 않음 |
+| SQL 정의 | 매퍼 XML (`<select>`·`<insert>`·`<update>`·`<delete>`) | `id` = 매퍼 메서드 이름, `namespace` = 매퍼 인터페이스의 전체 이름 |
+| 파라미터 바인딩 | `#{name}` | `PreparedStatement` 의 `?` 로 바인딩 (안전) |
+| 문자열 치환 | `${name}` | 값을 SQL 문자열에 그대로 삽입 → **SQL 인젝션 위험** |
+| 키 조회 | `useGeneratedKeys="true" keyProperty="id"` | INSERT 후 DB가 생성한 키를 파라미터 객체의 `id` 에 채움 |
+| 결과 매핑 | `resultType="Item"` | 컬럼명과 일치하는 프로퍼티에 값을 채움 |
+| 결과 매핑 | `<resultMap>` | 컬럼명 ↔ 프로퍼티명을 직접 지정 (별칭 `as` 대신) |
+| 여러 파라미터 | `@Param("name")` | 파라미터에 이름을 붙여 `#{updateParam.itemName}` 처럼 참조 |
+| 애노테이션 SQL | `@Select` · `@Insert` · `@Update` · `@Delete` | XML 없이 SQL 작성. 동적 쿼리가 어려워 단순한 SQL에만 |
+| SQL 재사용 | `<sql>` + `<include>` | SQL 조각을 정의하고 끼워 넣음 |
+
+### 동적 SQL
+
+| 태그 | 동작 |
+|---|---|
+| `<if test="...">` | 조건(OGNL)이 참이면 내용을 추가 |
+| `<choose>` / `<when>` / `<otherwise>` | 자바 `switch` 처럼 첫 번째로 맞는 하나만 추가 |
+| `<where>` | 내용이 비어 있으면 `WHERE` 를 붙이지 않고, 있으면 `WHERE` 를 붙인 뒤 맨 앞의 `AND ` / `OR ` 를 제거 |
+| `<set>` | UPDATE의 `SET` 절을 만들고 앞뒤에 남는 쉼표를 정리 |
+| `<trim prefix prefixOverrides>` | `<where>` · `<set>` 을 직접 정의하는 범용 버전 |
+| `<foreach>` | 컬렉션을 반복해 `in (1, 2, 3)` 같은 구문 생성 |
+
+### 설정
+
+```groovy
+implementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter:2.2.0'
+```
+
+```properties
+# main, test 의 application.properties 모두에 추가 (test 설정은 main 설정을 대체한다)
+# resultType 에 패키지명 생략 (하위 패키지 포함)
+mybatis.type-aliases-package=hello.itemservice.domain
+# item_name → itemName 매핑
+mybatis.configuration.map-underscore-to-camel-case=true
+# 매퍼가 실행하는 SQL 로그
+logging.level.hello.itemservice.repository.mybatis=trace
+# XML을 원하는 위치에 둘 때
+#mybatis.mapper-locations=classpath:mapper/**/*.xml
+```
+
+### 간단한 사용법
+
+```java
+@Mapper
+public interface ItemMapper {
+    void save(Item item);
+    void update(@Param("id") Long id, @Param("updateParam") ItemUpdateDto updateParam);
+    Optional<Item> findById(Long id);
+    List<Item> findAll(ItemSearchCond itemSearch);
+}
+```
+
+```xml
+<!-- src/main/resources/hello/itemservice/repository/mybatis/ItemMapper.xml -->
+<mapper namespace="hello.itemservice.repository.mybatis.ItemMapper">
+    <insert id="save" useGeneratedKeys="true" keyProperty="id">
+        insert into item (item_name, price, quantity)
+        values (#{itemName}, #{price}, #{quantity})
+    </insert>
+    <select id="findAll" resultType="Item">
+        select id, item_name, price, quantity
+        from item
+        <where>
+            <if test="itemName != null and itemName != ''">
+                and item_name like concat('%',#{itemName},'%')
+            </if>
+            <if test="maxPrice != null">
+                and price &lt;= #{maxPrice}
+            </if>
+        </where>
+    </select>
+</mapper>
+```
+
+### 매퍼 인터페이스가 동작하는 원리
+
+| 순서 | 동작 |
+|---|---|
+| 1 | 스프링 부트 자동 설정(`MybatisAutoConfiguration`)이 **`@SpringBootApplication` 클래스의 패키지 이하**에서 `@Mapper` 인터페이스를 찾는다. 컴포넌트 스캔 범위(`scanBasePackages`)와는 별개라서, 컴포넌트 스캔을 `web` 패키지로 좁혀도 매퍼는 등록된다 |
+| 2 | 찾은 인터페이스마다 `MapperFactoryBean` 을 빈으로 등록한다 |
+| 3 | 빈을 꺼낼 때 MyBatis가 `Proxy.newProxyInstance` 로 **JDK 동적 프록시** 구현체를 만든다 |
+| 4 | 프록시 메서드 호출 → `namespace` + 메서드 이름으로 SQL을 찾아 실행 → 결과를 반환 타입으로 매핑 |
+| 5 | SQL 실행은 `SqlSessionTemplate` 을 거친다. 여기서 스프링 트랜잭션의 커넥션을 함께 쓰고, MyBatis 예외를 스프링의 `DataAccessException` 계층으로 변환한다 |
+
+### JdbcTemplate vs MyBatis
+
+| 비교 | JdbcTemplate | MyBatis |
+|---|---|---|
+| 설정 | 스프링 내장, 별도 설정 없음 | 의존성 + 프로퍼티 설정 필요 |
+| SQL 작성 | 자바 문자열 (`+` 로 이어 붙임) | XML에 여러 줄 그대로 |
+| 동적 쿼리 | 자바 코드로 직접 조립 | `<if>`, `<where>`, `<foreach>` 등 태그 |
+| 선택 기준 | 단순한 쿼리 위주 | 동적·복잡한 쿼리가 많을 때 |
+
+### 해결하는 것 vs 한계
+
+| 해결하는 것 | 한계 |
+|---|---|
+| 동적 쿼리를 태그로 선언 (JdbcTemplate의 최대 단점 해결) | SQL은 여전히 직접 작성해야 함 → 테이블·컬럼이 바뀌면 SQL을 모두 고쳐야 함 |
+| SQL이 자바 코드와 분리되어 읽기 쉬움 | XML과 인터페이스가 분리되어 오타·불일치가 **실행 시점**에 드러남 |
+| 매퍼 인터페이스만으로 DAO 구현 (반복 코드 제거) | 연관 객체 조회(`<association>`, `<collection>`)는 작성 공수가 크고 성능 최적화가 어려움 |
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| XML 위치·이름 | `mapper-locations` 를 지정하지 않으면 매퍼 인터페이스의 **패키지 경로 + 인터페이스 이름 + `.xml`** 을 클래스패스에서 찾는다 (`hello/itemservice/repository/mybatis/ItemMapper.xml`). 경로나 파일명이 다르면 SQL을 찾지 못한다 |
+| XML 특수문자 | `<`, `>`, `&` 는 태그로 해석되므로 `&lt;`, `&gt;`, `&amp;` 로 쓰거나 `<![CDATA[ ... ]]>` 로 감싼다. CDATA 안에서는 `<if>`, `<where>` 같은 태그도 문자로 취급된다 |
+| `${}` 사용 | 값이 SQL에 그대로 들어가므로 사용자 입력에 쓰면 SQL 인젝션. 정렬 컬럼명처럼 꼭 필요할 때만, 허용 값 목록으로 검증한 뒤 사용 |
+| `@Param` | MyBatis는 기본적으로 실제 파라미터 이름을 쓰고(`useActualParamName=true`), 스프링 부트 Gradle 플러그인은 `-parameters` 옵션으로 컴파일한다. 그래서 이 프로젝트에선 `@Param` 없이도 이름으로 찾을 수 있다. 하지만 컴파일 옵션에 의존하므로 파라미터가 2개 이상이면 `@Param` 으로 명시하는 것이 안전 |
+| 매핑 실패가 조용함 | `map-underscore-to-camel-case` 는 컬럼명의 `_` 를 지우고 프로퍼티 이름과 대소문자 구분 없이 비교한다. 일치하는 프로퍼티가 없는 컬럼은 기본 설정(`autoMappingUnknownColumnBehavior=NONE`)에서 **예외 없이 무시**된다 |
+| 설정 파일 | test 의 `application.properties` 가 main 설정을 대체하므로 MyBatis 설정을 양쪽에 모두 넣어야 테스트에서도 적용된다 |
 
 </details>
