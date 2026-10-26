@@ -9,6 +9,7 @@
 * 섹션 3 | 데이터 접근 기술 - 스프링 JdbcTemplate
 * 섹션 4 | 데이터 접근 기술 - 테스트
 * 섹션 5 | 데이터 접근 기술 - MyBatis
+* 섹션 6 | 데이터 접근 기술 - JPA
 
 
 
@@ -335,5 +336,109 @@ public interface ItemMapper {
 | `@Param` | MyBatis는 기본적으로 실제 파라미터 이름을 쓰고(`useActualParamName=true`), 스프링 부트 Gradle 플러그인은 `-parameters` 옵션으로 컴파일한다. 그래서 이 프로젝트에선 `@Param` 없이도 이름으로 찾을 수 있다. 하지만 컴파일 옵션에 의존하므로 파라미터가 2개 이상이면 `@Param` 으로 명시하는 것이 안전 |
 | 매핑 실패가 조용함 | `map-underscore-to-camel-case` 는 컬럼명의 `_` 를 지우고 프로퍼티 이름과 대소문자 구분 없이 비교한다. 일치하는 프로퍼티가 없는 컬럼은 기본 설정(`autoMappingUnknownColumnBehavior=NONE`)에서 **예외 없이 무시**된다 |
 | 설정 파일 | test 의 `application.properties` 가 main 설정을 대체하므로 MyBatis 설정을 양쪽에 모두 넣어야 테스트에서도 적용된다 |
+
+</details>
+
+
+
+# 섹션 6 | 데이터 접근 기술 - JPA
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> 객체와 테이블을 매핑해두면 JPA가 SQL을 만들어 실행하는 ORM 표준(구현체: 하이버네이트).
+> 개발자는 컬렉션을 다루듯 객체를 저장·조회·수정하고, 변경 감지·예외 변환 같은 반복 작업은 JPA와 스프링이 처리한다.
+> (사용 버전: Spring Boot 2.6.5 → Hibernate 5.6.7, spring-data-jpa 2.6.3, `javax.persistence` 패키지)
+
+### 한눈에 보기
+
+| 구분 | API / 설정 | 핵심 |
+|---|---|---|
+| 엔티티 | `@Entity` | JPA가 관리하는 객체. `public` 또는 `protected` 기본 생성자 필수 |
+| PK | `@Id` + `@GeneratedValue(strategy = IDENTITY)` | DB가 PK를 생성 (auto increment) |
+| 컬럼 | `@Column(name, length)` | 필드 ↔ 컬럼 매핑. `length` 는 DDL 생성 시 `varchar` 길이로 사용 |
+| 핵심 객체 | `EntityManager` | 저장·조회·쿼리 등 JPA의 모든 동작이 이 객체를 통해 이뤄짐 |
+| 저장 | `em.persist(entity)` | INSERT. IDENTITY 전략이면 실행 후 생성된 PK를 엔티티 `id` 에 채움 |
+| 단건 조회 | `em.find(Entity.class, id)` | PK로 조회. 없으면 `null` |
+| 수정 | (메서드 없음) 조회한 엔티티의 값 변경 | **변경 감지**: flush 시점에 바뀐 엔티티를 찾아 UPDATE 실행 |
+| 목록 조회 | JPQL `em.createQuery("select i from Item i", Item.class)` | 테이블이 아니라 **엔티티와 필드**를 대상으로 하는 쿼리. 파라미터는 `:name` + `setParameter()` |
+| 트랜잭션 | `@Transactional` | 데이터 변경은 트랜잭션 안에서만 가능 (조회는 없어도 됨). 보통 서비스 계층에 붙인다 |
+| 예외 변환 | `@Repository` | JPA 예외를 스프링 `DataAccessException` 으로 바꾸는 AOP 프록시 적용 대상 |
+
+### 설정
+
+```groovy
+// spring-boot-starter-jdbc 를 포함하므로 jdbc 스타터는 제거해도 된다 (mybatis 스타터도 jdbc 스타터를 포함)
+implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+```
+
+```properties
+# 하이버네이트가 실행하는 SQL (logger로 출력)
+logging.level.org.hibernate.SQL=DEBUG
+# SQL에 바인딩되는 파라미터 값 (Hibernate 5 기준 로거 이름)
+logging.level.org.hibernate.type.descriptor.sql.BasicBinder=TRACE
+# spring.jpa.show-sql=true 는 System.out 으로 출력하므로 비권장 (logger 와 같이 켜면 중복 출력)
+```
+
+### 간단한 사용법
+
+```java
+@Repository      // 예외 변환 AOP 대상
+@Transactional   // 예제라서 리포지토리에 붙임. 실무에서는 서비스 계층
+public class JpaItemRepository implements ItemRepository {
+
+    private final EntityManager em;
+
+    public JpaItemRepository(EntityManager em) { this.em = em; }
+
+    public Item save(Item item) {
+        em.persist(item);                                  // INSERT
+        return item;
+    }
+
+    public void update(Long itemId, ItemUpdateDto updateParam) {
+        Item findItem = em.find(Item.class, itemId);
+        findItem.setItemName(updateParam.getItemName());   // update 호출 없음 → 변경 감지
+    }
+
+    public List<Item> findAll(ItemSearchCond cond) {
+        return em.createQuery("select i from Item i where i.price <= :maxPrice", Item.class)
+                .setParameter("maxPrice", cond.getMaxPrice())
+                .getResultList();
+    }
+}
+```
+
+### 동작 원리
+
+| 동작 | 실제로 일어나는 일 |
+|---|---|
+| 컬럼 이름 결정 | 스프링 부트가 `CamelCaseToUnderscoresNamingStrategy` 를 기본 적용 → `@Column` 이 없어도 `itemName` 필드는 `item_name` 컬럼에 매핑 |
+| `EntityManager` 생성자 주입 | 주입되는 것은 실제 `EntityManager` 가 아니라 **공유 프록시**(`SharedEntityManagerCreator`). 호출 시점의 트랜잭션에 묶인 실제 `EntityManager` 로 위임하므로 싱글톤 빈에 주입해도 안전. 생성자 주입이 되는 건 spring-data-jpa가 이 프록시를 빈으로 등록해주기 때문 |
+| `persist()` + IDENTITY | PK를 DB가 만들기 때문에 **`persist()` 호출 즉시 INSERT** 를 실행한다 (커밋까지 미루지 않음) |
+| 변경 감지 | 트랜잭션 커밋 직전(flush)에 처음 조회한 상태와 비교해 바뀐 엔티티만 UPDATE |
+| 같은 트랜잭션 안의 `find()` | 이미 조회·저장한 엔티티는 DB를 다시 조회하지 않고 같은 객체를 돌려준다 (영속성 컨텍스트, JPA 기본편 주제) |
+| 예외 변환 | 스프링 부트가 `PersistenceExceptionTranslationPostProcessor` 를 등록 → **클래스에 `@Repository` 가 붙은 빈**에 예외 변환 프록시를 적용. 컴포넌트 스캔이 아니라 `@Bean` 으로 등록해도 적용된다 |
+
+### 해결하는 것 vs 한계
+
+| 해결하는 것 | 한계 |
+|---|---|
+| 기본 CRUD SQL을 직접 쓰지 않음 (테이블·컬럼 변경 시 매핑만 수정) | **동적 쿼리는 여전히 문자열 조립** (JPQL도 `where`/`and` 를 직접 붙임) → Querydsl 이 해결 |
+| 수정 시 `update` 호출 없이 객체 값만 바꾸면 됨 (변경 감지) | SQL이 언제 실행되는지 코드에 보이지 않음 → 영속성 컨텍스트·flush 시점을 모르면 디버깅이 어려움 |
+| JPA 예외도 스프링 예외 계층으로 변환 | 학습량이 많음 (영속성 컨텍스트, 연관관계, 지연 로딩 등은 별도 강의 분량) |
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| 테스트에서 UPDATE 미실행 | 테스트는 끝에 롤백되므로 flush가 일어나지 않아 **UPDATE SQL이 실행되지 않는다**. 같은 트랜잭션의 `find()` 는 DB를 다시 조회하지 않고 메모리의 같은 객체를 돌려주므로, `updateItem()` 테스트는 DB 반영 여부와 상관없이 통과한다. 실제 SQL까지 검증하려면 `em.flush()` 후 `em.clear()` 하고 다시 조회하거나 `@Commit` 사용 |
+| 테스트 테이블은 엔티티 기준 | 임베디드 DB이고 마이그레이션 도구가 없으면 `spring.jpa.hibernate.ddl-auto` 기본값이 `create-drop` 이다. `schema.sql` 이 먼저 테이블을 만들어도 하이버네이트가 **지우고 엔티티 매핑대로 다시 만든다** (종료 시 삭제). 그래서 `schema.sql` 과 엔티티 매핑이 달라도 테스트에서는 드러나지 않음. 임베디드가 아닌 DB에서는 기본값이 `none` |
+| 기본 생성자 | JPA가 리플렉션으로 엔티티를 생성하므로 `public`/`protected` 기본 생성자가 없으면 조회가 실패한다 |
+| JPQL 대소문자 | 엔티티 이름(`Item`)과 필드 이름(`itemName`)은 대소문자를 구분한다 |
+| 트랜잭션 위치 | 변경이 트랜잭션 밖에서 일어나면 반영되지 않거나 예외가 발생한다. 예제처럼 리포지토리에 `@Transactional` 을 붙인 건 서비스 로직이 단순해서이고, 원칙은 유스케이스를 시작하는 서비스 계층 |
+| SQL 로그 설정 | 파라미터 로거 이름은 하이버네이트 버전에 따라 다르다. Hibernate 5(이 프로젝트)는 `org.hibernate.type.descriptor.sql.BasicBinder` |
 
 </details>
