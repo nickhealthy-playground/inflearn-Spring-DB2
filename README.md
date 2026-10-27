@@ -12,6 +12,7 @@
 * 섹션 6 | 데이터 접근 기술 - JPA
 * 섹션 7 | 데이터 접근 기술 - 스프링 데이터 JPA
 * 섹션 8 | 데이터 접근 기술 - Querydsl
+* 섹션 9 | 데이터 접근 기술 - 활용 방안
 
 
 
@@ -662,5 +663,83 @@ public class JpaItemRepositoryV3 implements ItemRepository {
 | 조건이 모두 없으면 전체 조회 | `where` 에 넘긴 조건이 전부 `null` 이면 `where` 절이 사라져 **테이블 전체를 조회**한다. 데이터가 많은 화면이면 페이징이나 필수 조건을 함께 둔다 |
 | `like` 와 와일드카드 | `like("%" + x + "%")` 는 사용자 입력의 `%`, `_` 를 이스케이프하지 않는다. 부분 일치는 `contains(x)` 를 쓰면 이스케이프까지 처리된다 |
 | 조건 메서드 반환 타입 | `null` 을 돌려줄 수 있는 조건 메서드는 `BooleanExpression` 으로 선언해야 `and()` / `or()` 로 다른 조건과 조합할 수 있다 (`Predicate` 인터페이스에는 `and()` 가 없음) |
+
+</details>
+
+
+
+# 섹션 9 | 데이터 접근 기술 - 활용 방안
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> 정답 구조는 없고 **트레이드 오프**를 알고 고르는 것: 추상화(어댑터)로 구조의 안정성을 얻을지, 추상화를 걷어내고 단순함과 개발 속도를 얻을지.
+> 실용적인 조합은 기본 CRUD는 스프링 데이터 JPA, 복잡한 조회는 Querydsl, 그래도 안 풀리는 SQL은 JdbcTemplate·MyBatis. 트랜잭션은 `JpaTransactionManager` 하나로 묶는다.
+
+### 구조 선택: 어댑터 vs 직접 사용
+
+| 비교 | 어댑터 유지 (`JpaItemRepositoryV2`) | 서비스가 직접 사용 (`ItemServiceV2`) |
+|---|---|---|
+| 의존 관계 | `ItemService → ItemRepository ← 어댑터 → SpringDataJpa 리포지토리` | `ItemService → ItemRepositoryV2(스프링 데이터 JPA) + ItemQueryRepositoryV2(Querydsl)` |
+| 얻는 것 | DI·OCP 유지 → 서비스 코드 변경 없이 구현 기술 교체 | 클래스 수가 줄고 구조가 단순, 스프링 데이터 JPA 기능을 바로 사용 |
+| 잃는 것 | 어댑터 + 실제 코드를 함께 유지보수, 구조 복잡 | 리포지토리 구현 기술이 바뀌면 서비스 코드를 고쳐야 함 |
+| 맞는 상황 | 기술 교체 가능성이 실제로 있고 구조 안정성이 중요할 때 | 규모가 작거나 속도가 중요한 단계(프로토타입 등) |
+
+추상화도 유지보수 비용이다. 인터페이스·어댑터는 그 비용을 넘는 효과가 있을 때만 도입한다.
+
+### 실용적인 구조
+
+| 구성 요소 | 역할 |
+|---|---|
+| `ItemRepositoryV2 extends JpaRepository<Item, Long>` | 기본 CRUD + 단순 조회 (스프링 데이터 JPA) |
+| `ItemQueryRepositoryV2` (`@Repository`, `JPAQueryFactory`) | 복잡한 조회·동적 쿼리만 담당 (Querydsl). 복잡한 쿼리는 이 클래스만 보면 됨 |
+| `ItemServiceV2` (`@Transactional`) | 두 리포지토리를 직접 사용. 트랜잭션은 서비스가 시작 → `update()` 의 변경 감지가 동작 |
+| `V2Config` | 위 빈 등록. `ItemRepository` 빈(`JpaItemRepositoryV3`)은 기존 테스트용으로 유지 |
+
+```java
+@Transactional
+public class ItemServiceV2 implements ItemService {
+
+    private final ItemRepositoryV2 itemRepositoryV2;            // 스프링 데이터 JPA
+    private final ItemQueryRepositoryV2 itemQueryRepositoryV2;  // Querydsl
+
+    public void update(Long itemId, ItemUpdateDto updateParam) {
+        Item findItem = itemRepositoryV2.findById(itemId).orElseThrow();
+        findItem.setPrice(updateParam.getPrice());               // 서비스 트랜잭션 안이라 커밋 시 UPDATE
+    }
+
+    public List<Item> findItems(ItemSearchCond cond) {
+        return itemQueryRepositoryV2.findAll(cond);
+    }
+}
+```
+
+### 기술 조합 기준
+
+| 상황 | 선택 |
+|---|---|
+| 일반적인 CRUD·조회 (대부분) | JPA + 스프링 데이터 JPA + Querydsl |
+| 이 조합으로 풀기 어려운 복잡한 SQL (통계 쿼리 등) | 해당 부분만 JdbcTemplate 또는 MyBatis |
+| SQL에 익숙한 팀, 통계 쿼리 위주 | JdbcTemplate·MyBatis 비중을 높임 (학습 곡선 고려) |
+
+### 여러 기술을 한 트랜잭션으로 묶기
+
+| 동작 | 실제로 일어나는 일 |
+|---|---|
+| 트랜잭션 매니저 등록 | JPA가 있으면 스프링 부트가 `JpaTransactionManager` 를 등록하고, `TransactionManager` 빈이 이미 있으므로 `DataSourceTransactionManager` 자동 등록은 건너뛴다 |
+| JdbcTemplate·MyBatis 참여 | `JpaTransactionManager` 는 트랜잭션 시작 시 JPA가 쓰는 JDBC 커넥션을 `DataSource` 키로 트랜잭션 동기화 매니저에 등록한다. JdbcTemplate·MyBatis는 `DataSourceUtils` 로 커넥션을 꺼내므로 **같은 커넥션 = 같은 트랜잭션** → 함께 커밋·롤백 |
+| `persist()` (IDENTITY) | 즉시 INSERT 되므로 같은 트랜잭션의 JdbcTemplate 조회에서 바로 보인다 |
+| 변경 감지 (엔티티 값 수정) | flush 전까지 DB에 반영되지 않으므로 **JdbcTemplate 조회에는 변경 전 값이 보인다**. JPQL과 달리 JdbcTemplate 쿼리 전에는 자동 flush 가 일어나지 않음 |
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| JPA → JdbcTemplate 순서로 쓸 때 | 같은 트랜잭션에서 JPA로 수정한 데이터를 JdbcTemplate·MyBatis로 읽거나 갱신하기 전에 `em.flush()` 를 호출해야 한다. 그렇지 않으면 변경 전 데이터를 읽고, 커밋 시점의 UPDATE가 JdbcTemplate 결과를 덮어쓸 수 있다 |
+| 새 구조의 테스트 | `ItemRepositoryTest` 는 `ItemRepository` 빈(`JpaItemRepositoryV3`)을 검증한다. `ItemRepositoryV2`·`ItemQueryRepositoryV2` 는 별도 테스트를 만들어야 검증된다 |
+| 빈 등록 방식 | `@SpringBootApplication(scanBasePackages = "hello.itemservice.web")` 라서 `@Service`·`@Repository` 가 붙어 있어도 컴포넌트 스캔되지 않는다. `V2Config` 의 `@Bean` 으로 등록되고, 붙어 있는 `@Transactional`·`@Repository`(예외 변환)는 빈 등록 방식과 상관없이 적용된다 |
+| 구조 선택의 비용 | 직접 사용 구조는 리포지토리 기술을 바꾸면 서비스 코드까지 바뀐다. 교체 가능성이 낮을 때 고르는 선택 |
 
 </details>
