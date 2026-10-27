@@ -10,6 +10,7 @@
 * 섹션 4 | 데이터 접근 기술 - 테스트
 * 섹션 5 | 데이터 접근 기술 - MyBatis
 * 섹션 6 | 데이터 접근 기술 - JPA
+* 섹션 7 | 데이터 접근 기술 - 스프링 데이터 JPA
 
 
 
@@ -440,5 +441,102 @@ public class JpaItemRepository implements ItemRepository {
 | JPQL 대소문자 | 엔티티 이름(`Item`)과 필드 이름(`itemName`)은 대소문자를 구분한다 |
 | 트랜잭션 위치 | 변경이 트랜잭션 밖에서 일어나면 반영되지 않거나 예외가 발생한다. 예제처럼 리포지토리에 `@Transactional` 을 붙인 건 서비스 로직이 단순해서이고, 원칙은 유스케이스를 시작하는 서비스 계층 |
 | SQL 로그 설정 | 파라미터 로거 이름은 하이버네이트 버전에 따라 다르다. Hibernate 5(이 프로젝트)는 `org.hibernate.type.descriptor.sql.BasicBinder` |
+
+</details>
+
+
+
+# 섹션 7 | 데이터 접근 기술 - 스프링 데이터 JPA
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> JPA를 더 편하게 쓰도록 돕는 라이브러리. 인터페이스만 선언하면 **공통 CRUD**와 **메서드 이름 기반 쿼리**의 구현체를 프록시로 만들어 빈으로 등록해준다.
+> JPA 위에서 동작하므로 영속성 컨텍스트·변경 감지 같은 JPA 동작을 이해하는 것이 먼저다.
+> (사용 버전: spring-data-jpa 2.6.3, Hibernate 5.6.5 — 아래 하이버네이트 버그 때문에 5.6.7에서 내려서 고정)
+
+### 한눈에 보기
+
+| 구분 | API | 핵심 |
+|---|---|---|
+| 공통 인터페이스 | `JpaRepository<엔티티, ID>` | 상속만 하면 `save`, `findById`, `findAll`, `delete`, `count` 등 CRUD와 페이징·정렬 제공 |
+| 구현체 | `SimpleJpaRepository` | 공통 기능의 실제 구현. 인터페이스 프록시가 이 객체로 위임 |
+| 쿼리 메서드 | `findByItemNameLike(...)` | 메서드 이름을 분석해 JPQL을 생성 |
+| 직접 쿼리 | `@Query("select i from Item i where ...")` | JPQL을 직접 작성. 메서드 이름 규칙은 무시. `nativeQuery = true` 면 SQL |
+| 파라미터 | `@Param("name")` | `@Query` 의 `:name` 과 메서드 파라미터 연결 |
+
+### 쿼리 메서드 이름 규칙
+
+| 기능 | 접두어 | 반환 타입 |
+|---|---|---|
+| 조회 | `find…By`, `read…By`, `query…By`, `get…By` (`…` 에는 설명용 이름 가능, 예: `findHelloBy`) | 엔티티, `Optional`, `List` |
+| 개수 | `count…By` | `long` |
+| 존재 여부 | `exists…By` | `boolean` |
+| 삭제 | `delete…By`, `remove…By` | `long` |
+| 중복 제거 | `findDistinct…By`, `find…DistinctBy` | |
+| 개수 제한 | `findFirst…By`, `findFirst3…By`, `findTop…By`, `findTop3…By` | |
+
+조건 키워드: `And`, `Or`, `LessThanEqual`, `GreaterThan`, `Like`, `Containing`, `StartingWith`, `IsNull`, `OrderBy…Desc` 등 ([공식 문서](https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.query-methods.query-creation))
+
+### 간단한 사용법
+
+```java
+public interface SpringDataJpaItemRepository extends JpaRepository<Item, Long> {
+
+    List<Item> findByItemNameLike(String itemName);              // where i.itemName like ?
+    List<Item> findByPriceLessThanEqual(Integer price);           // where i.price <= ?
+
+    @Query("select i from Item i where i.itemName like :itemName and i.price <= :price")
+    List<Item> findItems(@Param("itemName") String itemName, @Param("price") Integer price);
+}
+```
+
+```java
+// 기존 ItemRepository 인터페이스를 유지하기 위한 어댑터
+@Repository
+@Transactional
+@RequiredArgsConstructor
+public class JpaItemRepositoryV2 implements ItemRepository {
+
+    private final SpringDataJpaItemRepository repository;   // 스프링 데이터 JPA가 만든 프록시
+
+    public void update(Long itemId, ItemUpdateDto updateParam) {
+        Item findItem = repository.findById(itemId).orElseThrow();
+        findItem.setItemName(updateParam.getItemName());     // 변경 감지로 UPDATE
+    }
+}
+```
+
+`ItemService → JpaItemRepositoryV2(어댑터) → SpringDataJpaItemRepository(프록시)` 구조라서, 서비스 코드는 바꾸지 않고 설정(`SpringDataJpaConfig`)만 바꿔 구현 기술을 교체한다.
+
+### 동작 원리
+
+| 동작 | 실제로 일어나는 일 |
+|---|---|
+| 구현체 생성 | 애플리케이션 시작 시 `JpaRepository` 를 상속한 인터페이스마다 프록시를 만들어 빈으로 등록. 공통 메서드는 `SimpleJpaRepository` 로, 쿼리 메서드는 미리 만들어 둔 쿼리 객체로 실행 |
+| 쿼리 생성 시점 | 쿼리 메서드의 이름 분석(`PartTree`)과 `@Query` 의 JPQL 검증은 **리포지토리 생성 시점**에 일어난다 → 메서드 이름 오타나 잘못된 JPQL은 애플리케이션 시작 단계에서 실패 |
+| `save()` | 엔티티가 새것이면 `persist`, 아니면 `merge`. 새것 판단 기준은 **ID가 `null` 인지**(래퍼 타입), 원시 타입이면 `0` 인지 |
+| 기본 트랜잭션 | `SimpleJpaRepository` 는 클래스에 `@Transactional(readOnly = true)`, 변경 메서드(`save`, `delete…`)에 `@Transactional`. 바깥에 트랜잭션이 있으면 거기에 참여 |
+| 예외 변환 | 리포지토리 프록시에 `PersistenceExceptionTranslationInterceptor` 가 기본으로 붙어 있어서, 인터페이스에 `@Repository` 가 없어도 `DataAccessException` 으로 변환 |
+| `@Param` 생략 | 애노테이션이 없으면 컴파일된 파라미터 이름을 쓴다. 이 프로젝트는 `-parameters` 로 컴파일되므로 생략해도 동작하지만, 컴파일 옵션에 의존하므로 명시가 안전 |
+
+### 해결하는 것 vs 한계
+
+| 해결하는 것 | 한계 |
+|---|---|
+| 엔티티마다 반복되던 CRUD 리포지토리 구현이 사라짐 | **동적 쿼리 지원이 약함** → 조건 조합마다 메서드를 따로 만들고 `if` 로 분기해야 함 (Querydsl이 해결) |
+| 단순 조회는 메서드 선언만으로 끝남 | 조건이 늘면 메서드 이름이 길어지고, 조인 같은 복잡한 조건은 표현 불가 → `@Query` 로 전환 |
+| 페이징·정렬 같은 공통 기능 제공 | `Example`(Query By Example)로 약간의 동적 쿼리가 가능하지만 실무에서 쓰기엔 기능이 빈약 |
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| 하이버네이트 5.6.6 ~ 5.6.7 LIKE 버그 | 스프링 부트 2.6.5 기본 버전(5.6.7)에서 `Like` 쿼리 메서드 실행 시 `Parameter value [\] did not match expected type [java.lang.String (n/a)]` 발생. `build.gradle` 에 `ext["hibernate.version"] = "5.6.5.Final"` 로 버전을 내려서 해결 |
+| `Like` 와 `%` | `Like` 는 전달한 값을 그대로 쓰므로 호출하는 쪽에서 `"%" + itemName + "%"` 를 붙여야 한다. 이때 사용자 입력의 `%`, `_` 도 와일드카드로 동작한다. `Containing` 을 쓰면 `%` 를 자동으로 붙이고 입력값의 와일드카드 문자는 이스케이프한다 |
+| ID를 직접 넣고 `save()` | ID가 `null` 이 아니면 새 엔티티로 보지 않고 `merge` 를 호출 → 먼저 SELECT 한 뒤 저장. 직접 ID를 할당하는 엔티티는 `Persistable` 구현 등으로 새것 여부를 알려줘야 한다 |
+| 변경 감지는 트랜잭션 필요 | `findById()` 로 꺼낸 엔티티를 수정하는 `update()` 는 어댑터(`JpaItemRepositoryV2`)의 `@Transactional` 범위 안에 있어야 커밋 시 UPDATE 된다. 트랜잭션 없이 호출하면 `findById()` 의 짧은 읽기 전용 트랜잭션이 끝난 뒤라 변경이 반영되지 않는다 |
 
 </details>
