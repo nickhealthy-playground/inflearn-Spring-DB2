@@ -11,6 +11,7 @@
 * 섹션 5 | 데이터 접근 기술 - MyBatis
 * 섹션 6 | 데이터 접근 기술 - JPA
 * 섹션 7 | 데이터 접근 기술 - 스프링 데이터 JPA
+* 섹션 8 | 데이터 접근 기술 - Querydsl
 
 
 
@@ -538,5 +539,128 @@ public class JpaItemRepositoryV2 implements ItemRepository {
 | `Like` 와 `%` | `Like` 는 전달한 값을 그대로 쓰므로 호출하는 쪽에서 `"%" + itemName + "%"` 를 붙여야 한다. 이때 사용자 입력의 `%`, `_` 도 와일드카드로 동작한다. `Containing` 을 쓰면 `%` 를 자동으로 붙이고 입력값의 와일드카드 문자는 이스케이프한다 |
 | ID를 직접 넣고 `save()` | ID가 `null` 이 아니면 새 엔티티로 보지 않고 `merge` 를 호출 → 먼저 SELECT 한 뒤 저장. 직접 ID를 할당하는 엔티티는 `Persistable` 구현 등으로 새것 여부를 알려줘야 한다 |
 | 변경 감지는 트랜잭션 필요 | `findById()` 로 꺼낸 엔티티를 수정하는 `update()` 는 어댑터(`JpaItemRepositoryV2`)의 `@Transactional` 범위 안에 있어야 커밋 시 UPDATE 된다. 트랜잭션 없이 호출하면 `findById()` 의 짧은 읽기 전용 트랜잭션이 끝난 뒤라 변경이 반영되지 않는다 |
+
+</details>
+
+
+
+# 섹션 8 | 데이터 접근 기술 - Querydsl
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> JPQL을 문자열 대신 **자바 코드로 작성**하게 해주는 쿼리 빌더. 엔티티로부터 생성한 Q타입을 사용하므로 오타가 컴파일 시점에 드러나고, **동적 쿼리**를 조건 메서드 조합으로 깔끔하게 만들 수 있다.
+> (사용 버전: Querydsl 5.0.0 — 스프링 부트 2.6.5가 버전을 관리)
+
+### 한눈에 보기
+
+| 구분 | API | 핵심 |
+|---|---|---|
+| 쿼리 시작점 | `JPAQueryFactory` | `EntityManager` 로 생성. JPQL을 만들어 JPA로 실행 |
+| Q타입 | `QItem.item` | `@Entity` 를 보고 애노테이션 프로세서가 컴파일 시점에 생성하는 쿼리용 클래스 |
+| 조회 | `select(item).from(item).where(...).fetch()` | SQL과 비슷한 메서드 체인. `fetch()` 는 목록, `fetchOne()` 은 단건 |
+| 조건 | `item.price.loe(maxPrice)`, `item.itemName.like(...)` | `loe`(<=), `goe`(>=), `lt`, `gt`, `eq`, `like`, `contains` 등 |
+| 동적 조건 1 | `BooleanBuilder` | `builder.and(조건)` 으로 필요한 조건만 누적 |
+| 동적 조건 2 | `where(A, B)` + `BooleanExpression` 반환 메서드 | 각 조건을 메서드로 분리하고, 조건이 없으면 `null` 을 반환 |
+
+### 설정 (스프링 부트 2.x)
+
+```groovy
+dependencies {
+    implementation 'com.querydsl:querydsl-jpa'
+    annotationProcessor "com.querydsl:querydsl-apt:${dependencyManagement.importedProperties['querydsl.version']}:jpa"
+    annotationProcessor "jakarta.annotation:jakarta.annotation-api"
+    annotationProcessor "jakarta.persistence:jakarta.persistence-api"
+}
+
+// IntelliJ 빌드 모드에서 src/main/generated 에 생긴 Q타입을 gradle clean 으로 함께 삭제
+clean {
+    delete file('src/main/generated')
+}
+```
+
+- `querydsl-apt` 는 버전을 BOM에서 꺼내 와야 해서 `importedProperties['querydsl.version']` 를 쓰고, `:jpa` classifier 로 JPA용 프로세서를 지정한다.
+- `jakarta.persistence-api` 라는 이름이지만 스프링 부트 2.6이 관리하는 2.2.3 버전은 패키지가 `javax.persistence` 다. 그래서 `javax` 기반인 이 프로젝트와 맞는다 (스프링 부트 3.x는 `jakarta` 패키지라 classifier도 `:jakarta` 로 바뀜).
+
+| 빌드 방식 (IntelliJ 설정) | Q타입 생성 위치 | 삭제 |
+|---|---|---|
+| Gradle | `build/generated/sources/annotationProcessor/java/main` | `./gradlew clean` (build 폴더 삭제) |
+| IntelliJ IDEA | `src/main/generated` | 위 `clean` 블록이 함께 삭제 |
+
+### 간단한 사용법
+
+```java
+import static hello.itemservice.domain.QItem.item;
+
+@Repository      // Querydsl 은 자체 예외 변환이 없음 → @Repository 의 예외 변환 사용
+@Transactional
+public class JpaItemRepositoryV3 implements ItemRepository {
+
+    private final EntityManager em;
+    private final JPAQueryFactory query;
+
+    public JpaItemRepositoryV3(EntityManager em) {
+        this.em = em;
+        this.query = new JPAQueryFactory(em);
+    }
+
+    public List<Item> findAll(ItemSearchCond cond) {
+        return query
+                .select(item)
+                .from(item)
+                .where(likeItemName(cond.getItemName()), maxPrice(cond.getMaxPrice()))
+                .fetch();
+    }
+
+    private BooleanExpression likeItemName(String itemName) {
+        return StringUtils.hasText(itemName) ? item.itemName.like("%" + itemName + "%") : null;
+    }
+
+    private BooleanExpression maxPrice(Integer maxPrice) {
+        return maxPrice != null ? item.price.loe(maxPrice) : null;
+    }
+}
+```
+
+### 동작 원리
+
+| 동작 | 실제로 일어나는 일 |
+|---|---|
+| `where(A, B)` | 넘긴 조건마다 `addWhere` 를 호출하고, **`null` 이면 그냥 건너뛴다**. 남은 조건은 AND로 결합 → 조건이 모두 `null` 이면 `where` 절 자체가 없다 |
+| `BooleanBuilder.and(null)` | `null` 이면 무시 → 조건이 하나도 없으면 빈 빌더가 되어 `where` 절이 생기지 않음 |
+| `contains(x)` | JPQL로 `like :x escape '!'` 가 되고, 값 앞뒤에 `%` 를 붙이면서 **입력값의 `%`, `_` 를 이스케이프**한다 |
+| `like("%" + x + "%")` | 값을 그대로 쓰므로 사용자 입력의 `%`, `_` 가 와일드카드로 동작 |
+| `JPAQueryFactory(em)` | 주입되는 `em` 이 트랜잭션별 실제 `EntityManager` 로 위임하는 공유 프록시라서, `JPAQueryFactory` 를 싱글톤 빈으로 등록해도 안전 |
+| 예외 변환 | 쿼리는 결국 `EntityManager` 로 실행되므로 JPA 예외가 발생 → 클래스의 `@Repository` 프록시가 `DataAccessException` 으로 변환 |
+
+### 기술 흐름 정리 (섹션 3 ~ 8)
+
+| 기술 | SQL 작성 | 동적 쿼리 | 오타 발견 시점 |
+|---|---|---|---|
+| JdbcTemplate | 자바 문자열 | 문자열 직접 조립 | 실행 시점 |
+| MyBatis | XML | `<if>`, `<where>` 태그 | 실행 시점 |
+| JPA (JPQL) | 기본 CRUD는 자동, 조회는 JPQL 문자열 | 문자열 직접 조립 | 실행 시점 |
+| 스프링 데이터 JPA | 메서드 이름 / `@Query` | 약함 (조합마다 메서드) | 애플리케이션 시작 시점 |
+| Querydsl | 자바 코드 | 조건 메서드 + `where` 의 `null` 무시 | **컴파일 시점** |
+
+### 해결하는 것 vs 한계
+
+| 해결하는 것 | 한계 |
+|---|---|
+| 동적 쿼리를 조건 메서드 조합으로 해결 (`if` 분기 메서드 나열 불필요) | 설정이 번거롭고, 스프링 부트·IntelliJ·Gradle 버전에 따라 설정 방법이 달라짐 |
+| 필드·엔티티 오타가 컴파일 오류로 드러남 | Q타입이 컴파일 결과물이라 엔티티를 바꾸면 다시 빌드해야 IDE에서 보임 |
+| 조건 메서드(`likeItemName`, `maxPrice`)를 다른 쿼리에서 재사용 | JPQL로 표현할 수 있는 범위로 제한됨 (JPQL 이 지원하지 않는 SQL 기능은 네이티브 쿼리 필요) |
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| Q타입은 버전 관리 제외 | 컴파일할 때마다 생성되므로 Git에 넣지 않는다. Gradle 빌드 모드면 `build/` 아래라 자연히 제외되지만, IntelliJ 빌드 모드의 `src/main/generated` 는 `.gitignore` 에 따로 추가해야 한다 |
+| 빌드 방식 통일 | IntelliJ 의 Gradle 설정에서 "Build and run using" 과 "Run tests using" 을 같은 값으로 맞춘다. 섞이면 Q타입이 두 위치에 생겨 중복 클래스 오류가 날 수 있다 |
+| 조건이 모두 없으면 전체 조회 | `where` 에 넘긴 조건이 전부 `null` 이면 `where` 절이 사라져 **테이블 전체를 조회**한다. 데이터가 많은 화면이면 페이징이나 필수 조건을 함께 둔다 |
+| `like` 와 와일드카드 | `like("%" + x + "%")` 는 사용자 입력의 `%`, `_` 를 이스케이프하지 않는다. 부분 일치는 `contains(x)` 를 쓰면 이스케이프까지 처리된다 |
+| 조건 메서드 반환 타입 | `null` 을 돌려줄 수 있는 조건 메서드는 `BooleanExpression` 으로 선언해야 `and()` / `or()` 로 다른 조건과 조합할 수 있다 (`Predicate` 인터페이스에는 `and()` 가 없음) |
 
 </details>
