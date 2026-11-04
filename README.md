@@ -13,6 +13,7 @@
 * 섹션 7 | 데이터 접근 기술 - 스프링 데이터 JPA
 * 섹션 8 | 데이터 접근 기술 - Querydsl
 * 섹션 9 | 데이터 접근 기술 - 활용 방안
+* 섹션 10 | 스프링 트랜잭션 이해
 
 
 
@@ -741,5 +742,118 @@ public class ItemServiceV2 implements ItemService {
 | 새 구조의 테스트 | `ItemRepositoryTest` 는 `ItemRepository` 빈(`JpaItemRepositoryV3`)을 검증한다. `ItemRepositoryV2`·`ItemQueryRepositoryV2` 는 별도 테스트를 만들어야 검증된다 |
 | 빈 등록 방식 | `@SpringBootApplication(scanBasePackages = "hello.itemservice.web")` 라서 `@Service`·`@Repository` 가 붙어 있어도 컴포넌트 스캔되지 않는다. `V2Config` 의 `@Bean` 으로 등록되고, 붙어 있는 `@Transactional`·`@Repository`(예외 변환)는 빈 등록 방식과 상관없이 적용된다 |
 | 구조 선택의 비용 | 직접 사용 구조는 리포지토리 기술을 바꾸면 서비스 코드까지 바뀐다. 교체 가능성이 낮을 때 고르는 선택 |
+
+</details>
+
+
+
+# 섹션 10 | 스프링 트랜잭션 이해
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> `@Transactional` 은 **프록시 방식의 AOP**로 동작한다. 그래서 프록시를 거치지 않는 호출(내부 호출), 프록시가 아직 없는 시점(초기화), `public` 이 아닌 메서드에는 트랜잭션이 걸리지 않는다.
+> 예외가 트랜잭션 밖으로 나가면 **언체크 예외는 롤백, 체크 예외는 커밋**이 기본이고, `rollbackFor` / `noRollbackFor` 로 바꿀 수 있다.
+> (사용 버전: 스프링 부트 2.6.5 → 스프링 5.3.x, 트랜잭션 매니저는 JPA가 있으므로 `JpaTransactionManager`)
+
+### 한눈에 보기
+
+| 구분 | 내용 |
+|---|---|
+| 추상화 | `PlatformTransactionManager` (`getTransaction` / `commit` / `rollback`). 스프링 부트가 데이터 접근 기술을 보고 구현체를 자동 등록 (JdbcTemplate·MyBatis → `DataSourceTransactionManager`(`JdbcTransactionManager`), JPA → `JpaTransactionManager`) |
+| 사용 방식 | 선언적(`@Transactional`) vs 프로그래밍 방식(트랜잭션 매니저·`TransactionTemplate` 직접 사용). 실무는 대부분 선언적 |
+| 적용 확인 | `AopUtils.isAopProxy(bean)`, 클래스 이름의 `$$EnhancerBySpringCGLIB`, `TransactionSynchronizationManager.isActualTransactionActive()` |
+| 적용 위치 우선순위 | 더 구체적인 것이 우선: 클래스의 메서드 > 클래스 > 인터페이스의 메서드 > 인터페이스. 클래스에 붙이면 `public` 메서드 전체에 적용 |
+| 프록시 한계 | 내부 호출(`this.method()`), `public` 이 아닌 메서드, `@PostConstruct` 에는 적용되지 않음 |
+| 예외 기본 정책 | `RuntimeException`·`Error`(와 하위) → 롤백 / `Exception`(체크 예외와 하위) → 커밋 / 정상 리턴 → 커밋 |
+
+### 트랜잭션 옵션
+
+| 옵션 | 기본값 | 내용 |
+|---|---|---|
+| `value` / `transactionManager` | 기본 트랜잭션 매니저 | 트랜잭션 매니저가 둘 이상일 때 빈 이름으로 지정. `@Transactional("orderTxManager")` |
+| `rollbackFor` / `rollbackForClassName` | 없음 | 기본 정책에 더해 롤백할 예외 지정 (하위 예외 포함). `rollbackFor = Exception.class` 면 체크 예외도 롤백 |
+| `noRollbackFor` / `noRollbackForClassName` | 없음 | 기본 정책에 더해 롤백하지 않을 예외 지정 |
+| `propagation` | `REQUIRED` | 트랜잭션 전파. 다음 섹션에서 다룸 |
+| `isolation` | `DEFAULT` (DB 설정을 따름) | 격리 수준. 애플리케이션에서 직접 지정하는 경우는 드묾 |
+| `timeout` / `timeoutString` | 트랜잭션 시스템 기본값 | 초 단위. 운영 환경에 따라 동작하지 않을 수 있어 확인 필요 |
+| `readOnly` | `false` | 읽기 전용 트랜잭션. 아래 표 참고 |
+| `label` | 없음 | 애노테이션 값을 직접 읽어 쓰는 용도. 일반적으로 사용하지 않음 |
+
+| `readOnly = true` 적용 위치 | 동작 |
+|---|---|
+| 프레임워크 | JdbcTemplate: 변경 쿼리 실행 시 예외. JPA(하이버네이트): 커밋 시 flush 생략, 변경 감지용 스냅샷 생성 생략 |
+| JDBC 드라이버 | 변경 쿼리 시 예외, 읽기(replica) DB 커넥션으로 라우팅하는 드라이버도 있음 (DB·드라이버 버전마다 다름) |
+| 데이터베이스 | 읽기 전용으로 내부 최적화 (DB마다 다름) |
+
+### 간단한 사용법
+
+```java
+@Transactional(readOnly = true)          // 클래스 레벨: public 메서드 전체에 읽기 전용 트랜잭션
+static class LevelService {
+
+    @Transactional(readOnly = false)     // 메서드가 더 구체적 → 읽기·쓰기 트랜잭션
+    public void write() { ... }
+
+    public void read() { ... }           // 클래스 설정을 따라 readOnly = true
+}
+```
+
+```java
+@Transactional                                   // 런타임 예외 → 롤백
+public void runtimeException() { throw new RuntimeException(); }
+
+@Transactional                                   // 체크 예외 → 커밋
+public void checkedException() throws MyException { throw new MyException(); }
+
+@Transactional(rollbackFor = MyException.class)  // 체크 예외지만 롤백
+public void rollbackFor() throws MyException { throw new MyException(); }
+```
+
+```properties
+# 트랜잭션 시작·종료 (프록시)
+logging.level.org.springframework.transaction.interceptor=TRACE
+# 커밋·롤백 (JPA 사용 중이라 JpaTransactionManager 로그가 출력됨)
+logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG
+logging.level.org.hibernate.resource.transaction=DEBUG
+logging.level.org.springframework.jdbc.datasource.DataSourceTransactionManager=DEBUG
+```
+
+### 동작 원리
+
+| 동작 | 실제로 일어나는 일 |
+|---|---|
+| 프록시 등록 | `@Transactional` 이 클래스나 메서드에 하나라도 있으면 CGLIB 프록시(대상 클래스를 상속)를 만들어 **실제 객체 대신 스프링 빈으로 등록** → 주입받는 쪽도 프록시를 받음 |
+| 프록시 호출 | 프록시가 메서드에 트랜잭션 속성이 있는지 확인 → 있으면 트랜잭션 시작 후 실제 객체 호출, 리턴·예외에 따라 커밋·롤백. 없으면 그냥 실제 객체를 호출 |
+| 내부 호출 | `external()` 안의 `internal()` 은 `this.internal()` 이고 `this` 는 프록시가 아니라 **실제 객체** → 프록시를 거치지 않아 트랜잭션 없음 (`InternalCallV1Test`) |
+| 내부 호출 해결 | `internal()` 을 별도 클래스(`InternalService`)로 분리하고 주입받아 호출 → 외부 호출이 되어 프록시를 거침 (`InternalCallV2Test`). 실무에서 주로 쓰는 방법 |
+| `@PostConstruct` | 초기화 콜백이 먼저 호출되고 AOP 프록시는 그 뒤에 적용 → 트랜잭션 없음. `@EventListener(ApplicationReadyEvent.class)` 는 컨테이너 생성이 끝난 뒤 프록시를 통해 호출되므로 트랜잭션 적용 (`InitTxTest`) |
+| 예외 → 커밋/롤백 | 예외가 프록시 밖으로 나가면 `rollbackOn(ex)` 로 판단. 기본은 `RuntimeException`·`Error` 만 롤백, `rollbackFor`·`noRollbackFor` 가 있으면 그 규칙이 우선 |
+
+### 예외와 커밋, 롤백 - 활용 (`OrderService`)
+
+| 상황 | 예외 | 트랜잭션 | 결과 |
+|---|---|---|---|
+| 정상 | 없음 | 커밋 | `payStatus = 완료` |
+| 시스템 예외 (복구 불가능) | `RuntimeException` | 롤백 | 주문 데이터 없음 |
+| 비즈니스 예외 (잔고 부족) | `NotEnoughMoneyException` (체크 예외) | 커밋 | `payStatus = 대기` 로 저장 → 고객에게 입금 안내 |
+
+- 스프링의 기본 정책은 "체크 예외 = 비즈니스 의미가 있는 예외, 언체크 예외 = 복구 불가능한 예외" 라는 가정에서 나왔다. 꼭 따를 필요는 없고 `rollbackFor` 로 바꿀 수 있다.
+- 강의 예제에서 비즈니스 예외는 **리턴 값처럼** 쓰인다. 롤백하면 주문 자체가 사라져 입금 안내를 할 수 없으므로 커밋이 맞다.
+- 실무에서는 "남겨야 하는 비즈니스 결과"는 상태를 저장하고 **결과 값을 리턴**하고, "아무것도 남기면 안 되는 실패"는 **언체크 예외 + 롤백**으로 나누는 경우가 많다. 커밋 여부를 예외 타입에 숨기면, 체크 예외를 `RuntimeException` 으로 바꾸는 리팩터링 한 번에 데이터가 조용히 롤백되기 때문.
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| 내부 호출 | 같은 클래스 안에서 `@Transactional` 메서드를 호출하면 트랜잭션이 걸리지 않는다. 예외도 경고도 없으니 `isActualTransactionActive()` 나 트랜잭션 로그로 확인한다 |
+| `public` 메서드만 적용 | 스프링 5.3(부트 2.x)은 `public` 메서드에만 적용하고, `protected`·`private`·package-private 에 붙이면 **예외 없이 무시**된다. 스프링 6.0(부트 3.0)부터는 `protected`·package-private 에도 적용된다 |
+| 초기화 시점 | `@PostConstruct` + `@Transactional` 은 트랜잭션 없이 실행된다. 초기 데이터 적재 등은 `ApplicationReadyEvent` 리스너를 쓴다 |
+| 인터페이스에 붙이지 않기 | 스프링 5.0부터 CGLIB 프록시도 인터페이스의 `@Transactional` 을 인식하지만, AOP 방식에 따라 적용되지 않을 수 있어 공식 문서는 구체 클래스에 붙이기를 권장 |
+| 체크 예외는 커밋 | `throws` 로 체크 예외(`SQLException`, `IOException` 등)를 던지면 실패해도 커밋된다. 시스템 오류 성격의 체크 예외는 런타임 예외로 감싸거나 `rollbackFor` 를 지정한다 |
+| 예외를 삼키면 커밋 | 트랜잭션 메서드 안에서 예외를 catch 하고 밖으로 던지지 않으면 프록시는 정상 리턴으로 보고 커밋한다 |
+| 테스트 설정 클래스 | `@SpringBootTest(classes = SpringtxApplication.class)` 처럼 `classes` 를 지정하면 테스트 안의 중첩 `@TestConfiguration` 을 자동으로 찾지 않는다. 컴포넌트 스캔에서도 `TestTypeExcludeFilter` 가 제외하므로 빈이 없어 `NoSuchBeanDefinitionException` → `classes` 를 생략하거나 `@Import` 로 추가한다 |
 
 </details>
