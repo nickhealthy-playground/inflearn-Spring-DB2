@@ -14,6 +14,7 @@
 * 섹션 8 | 데이터 접근 기술 - Querydsl
 * 섹션 9 | 데이터 접근 기술 - 활용 방안
 * 섹션 10 | 스프링 트랜잭션 이해
+* 섹션 11 | 스프링 트랜잭션 전파1 - 기본
 
 
 
@@ -855,5 +856,110 @@ logging.level.org.springframework.jdbc.datasource.DataSourceTransactionManager=D
 | 체크 예외는 커밋 | `throws` 로 체크 예외(`SQLException`, `IOException` 등)를 던지면 실패해도 커밋된다. 시스템 오류 성격의 체크 예외는 런타임 예외로 감싸거나 `rollbackFor` 를 지정한다 |
 | 예외를 삼키면 커밋 | 트랜잭션 메서드 안에서 예외를 catch 하고 밖으로 던지지 않으면 프록시는 정상 리턴으로 보고 커밋한다 |
 | 테스트 설정 클래스 | `@SpringBootTest(classes = SpringtxApplication.class)` 처럼 `classes` 를 지정하면 테스트 안의 중첩 `@TestConfiguration` 을 자동으로 찾지 않는다. 컴포넌트 스캔에서도 `TestTypeExcludeFilter` 가 제외하므로 빈이 없어 `NoSuchBeanDefinitionException` → `classes` 를 생략하거나 `@Import` 로 추가한다 |
+
+</details>
+
+
+
+# 섹션 11 | 스프링 트랜잭션 전파1 - 기본
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> 트랜잭션이 진행 중일 때 트랜잭션을 또 시작하면 어떻게 동작할지 정하는 것이 **트랜잭션 전파(propagation)** 다. 기본값 `REQUIRED` 는 내부 트랜잭션이 외부 트랜잭션에 **참여**해서 하나의 물리 트랜잭션으로 묶인다.
+> 트랜잭션 매니저에 커밋·롤백을 호출하는 것은 **논리 트랜잭션** 단위이고, 실제 커넥션에 커밋·롤백(**물리 트랜잭션**)을 하는 것은 **신규 트랜잭션(`isNewTransaction() == true`)뿐**이다. **모든 논리 트랜잭션이 커밋되어야 물리 트랜잭션이 커밋되고, 하나라도 롤백되면 전체가 롤백된다.**
+> (사용 버전: 스프링 부트 2.6.5 → 스프링 5.3.x, 예제는 `@TestConfiguration` 으로 `DataSourceTransactionManager` 를 직접 등록)
+
+### 한눈에 보기
+
+| 구분 | 내용 |
+|---|---|
+| 물리 트랜잭션 | 실제 DB 커넥션 단위의 트랜잭션. `setAutoCommit(false)` 로 시작, `con.commit()` / `con.rollback()` 으로 끝남 |
+| 논리 트랜잭션 | 트랜잭션 매니저를 통해 시작·종료하는 단위. 트랜잭션이 여러 개 겹칠 때만 의미가 생김 |
+| 외부 / 내부 트랜잭션 | 먼저 시작해 물리 트랜잭션을 연 쪽이 외부(신규), 그 도중에 시작된 쪽이 내부(참여) |
+| 참여 | 내부 트랜잭션이 "아무것도 하지 않는 것". 동기화 매니저에 보관된 외부 트랜잭션의 커넥션을 그대로 쓰게 됨 |
+| 신규 여부 확인 | `TransactionStatus.isNewTransaction()`. 커밋·롤백 시 이 값으로 물리 커밋·롤백 여부를 결정 |
+| 트랜잭션 두 번 사용 | 트랜잭션1이 끝나고 트랜잭션2를 시작하면 완전히 별개. 각자 커밋·롤백되므로 하나로 묶이지 않음 |
+
+### 시나리오별 결과 (`BasicTxTest`)
+
+| 테스트 | 외부 | 내부 | 결과 | 확인할 로그 |
+|---|---|---|---|---|
+| `double_commit_rollback` | (트랜잭션1) 커밋 | (트랜잭션2) 롤백 | 1은 커밋, 2는 롤백. 서로 무관 | 같은 `conn0` 이지만 `HikariProxyConnection@주소` 가 다름 → 풀에서 각각 획득 |
+| `inner_commit` | 커밋 | 커밋 (참여) | 물리 커밋 1번 | 내부 시작 시 `Participating in existing transaction`, 내부 커밋 시 커넥션 로그 없음 |
+| `outer_rollback` | 롤백 | 커밋 (참여) | 전체 롤백 | 외부 롤백 시에만 `Rolling back JDBC transaction` |
+| `inner_rollback` | 커밋 | 롤백 (참여) | 전체 롤백 + **`UnexpectedRollbackException`** | `marking existing transaction as rollback-only` → `Global transaction is marked as rollback-only but transactional code requested commit` |
+| `inner_rollback_requires_new` | 커밋 | 롤백 (`REQUIRES_NEW`) | 외부 커밋, 내부만 롤백 | `Suspending current transaction, creating new transaction` → `Resuming suspended transaction` |
+
+### 전파 옵션
+
+| 옵션 | 기존 트랜잭션 없음 | 기존 트랜잭션 있음 | 비고 |
+|---|---|---|---|
+| `REQUIRED` (기본) | 새로 생성 | 참여 | 실무 대부분 |
+| `REQUIRES_NEW` | 새로 생성 | **새로 생성** (기존은 보류) | 가끔 사용. 커넥션 2개 사용 |
+| `SUPPORTS` | 트랜잭션 없이 진행 | 참여 | |
+| `NOT_SUPPORTED` | 트랜잭션 없이 진행 | 트랜잭션 없이 진행 (기존은 보류) | |
+| `MANDATORY` | `IllegalTransactionStateException` | 참여 | |
+| `NEVER` | 트랜잭션 없이 진행 | `IllegalTransactionStateException` | |
+| `NESTED` | 새로 생성 | 중첩 트랜잭션 (JDBC savepoint) | 중첩 롤백은 외부에 영향 없음, 외부 롤백은 중첩까지 롤백. JPA에서는 사용 불가 |
+
+- `isolation`, `timeout`, `readOnly` 는 **트랜잭션이 처음 시작될 때만** 적용된다. 참여하는 쪽에 지정한 값은 무시된다.
+
+### 간단한 사용법
+
+```java
+// 기본(REQUIRED): 내부 트랜잭션이 외부에 참여
+TransactionStatus outer = txManager.getTransaction(new DefaultTransactionAttribute());
+TransactionStatus inner = txManager.getTransaction(new DefaultTransactionAttribute());
+outer.isNewTransaction();  // true
+inner.isNewTransaction();  // false
+
+txManager.rollback(inner);                       // 물리 롤백 없이 rollback-only 표시만
+assertThatThrownBy(() -> txManager.commit(outer)) // 커밋을 요청했지만 물리 롤백
+        .isInstanceOf(UnexpectedRollbackException.class);
+```
+
+```java
+// REQUIRES_NEW: 내부 트랜잭션이 별도 커넥션으로 별도 물리 트랜잭션 시작
+DefaultTransactionAttribute definition = new DefaultTransactionAttribute();
+definition.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+TransactionStatus inner = txManager.getTransaction(definition);  // isNewTransaction() == true
+
+txManager.rollback(inner);  // 내부 커넥션(conn1)만 물리 롤백
+txManager.commit(outer);    // 외부 커넥션(conn0)은 물리 커밋
+```
+
+```java
+// @Transactional 에서는 propagation 속성으로 지정
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void save(Log log) { ... }
+```
+
+### 동작 원리
+
+| 단계 | 실제로 일어나는 일 |
+|---|---|
+| 외부 시작 | 동기화 매니저에 커넥션 없음 → `dataSource.getConnection()` → `setAutoCommit(false)` (물리 트랜잭션 시작) → 동기화 매니저에 보관 → `isNewTransaction = true` |
+| 내부 시작 (`REQUIRED`) | 동기화 매니저에서 기존 트랜잭션 확인 → 있으므로 **참여 (아무것도 안 함)** → `isNewTransaction = false`. 이후 로직은 동기화 매니저에서 외부의 커넥션을 꺼내 씀 |
+| 내부 커밋 | 신규가 아니므로 물리 커밋 호출 안 함 (호출하면 외부가 아직 진행 중인데 물리 트랜잭션이 끝나 버림) |
+| 내부 롤백 | 신규가 아니므로 물리 롤백 대신 **rollback-only 표시**. `DataSourceTransactionManager` 는 이 표시를 동기화 매니저에 보관된 `ConnectionHolder` 에 둔다 (`DataSourceTransactionObject#setRollbackOnly` → `getConnectionHolder().setRollbackOnly()`) |
+| 외부 커밋 | 신규이므로 물리 커밋 대상. 먼저 rollback-only 표시를 확인 → 있으면 **물리 롤백 후 `UnexpectedRollbackException`**, 없으면 물리 커밋 |
+| 내부 시작 (`REQUIRES_NEW`) | 기존 커넥션(conn0)을 동기화 매니저에서 떼어 내 **보류(suspend)** → 새 커넥션(conn1)으로 물리 트랜잭션 시작해 보관 → `isNewTransaction = true` |
+| `REQUIRES_NEW` 종료 | conn1 물리 커밋·롤백 후 반납 → 보류했던 conn0 을 다시 동기화 매니저에 **복원(resume)** |
+
+- 커밋을 요청했는데 롤백된 상황을 조용히 넘기면 "주문 성공"이라 응답했지만 실제로는 주문이 없는 상황이 된다. 그래서 스프링은 예외로 명확하게 알린다.
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| 같은 `conn0` ≠ 같은 커넥션 | 트랜잭션을 연달아 쓰면 풀이 반납된 conn0 을 다시 준다. 같은 트랜잭션인지는 `HikariProxyConnection@주소` 로 구분한다 |
+| 내부 롤백은 외부 커밋을 실패시킴 | `REQUIRED` 로 참여한 쪽이 롤백(또는 예외로 롤백 판정)되면 외부가 커밋해도 전체가 롤백되고 `UnexpectedRollbackException` 이 난다. 내부 예외를 외부에서 잡아도 마찬가지 → 다음 섹션(전파2 - 활용)에서 다룸 |
+| `REQUIRES_NEW` 는 커넥션 2개 | 외부 커넥션을 쥔 채 커넥션을 하나 더 요청한다. 동시 요청이 많으면 풀 고갈로 서로 기다리다 멈출 수 있으므로 꼭 필요한 곳에만 쓴다 |
+| 참여 시 옵션 무시 | 내부 트랜잭션에 `readOnly = true` 나 `timeout` 을 지정해도 참여하는 경우 적용되지 않는다. 처음 시작한 트랜잭션의 설정을 따른다 |
+| `NESTED` 와 JPA | savepoint 기반이라 JPA(`JpaTransactionManager`)에서는 사용할 수 없다 |
+| 트랜잭션 매니저 교체 | 예제의 `@TestConfiguration` 은 `transactionManager` 빈을 직접 등록해 부트 자동 등록(`JpaTransactionManager`)을 대체한다 (`@ConditionalOnMissingBean`). 그래서 로그가 `DataSourceTransactionManager` 로 찍힌다 |
 
 </details>
