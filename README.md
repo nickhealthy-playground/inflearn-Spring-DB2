@@ -15,6 +15,7 @@
 * 섹션 9 | 데이터 접근 기술 - 활용 방안
 * 섹션 10 | 스프링 트랜잭션 이해
 * 섹션 11 | 스프링 트랜잭션 전파1 - 기본
+* 섹션 12 | 스프링 트랜잭션 전파2 - 활용
 
 
 
@@ -961,5 +962,99 @@ public void save(Log log) { ... }
 | 참여 시 옵션 무시 | 내부 트랜잭션에 `readOnly = true` 나 `timeout` 을 지정해도 참여하는 경우 적용되지 않는다. 처음 시작한 트랜잭션의 설정을 따른다 |
 | `NESTED` 와 JPA | savepoint 기반이라 JPA(`JpaTransactionManager`)에서는 사용할 수 없다 |
 | 트랜잭션 매니저 교체 | 예제의 `@TestConfiguration` 은 `transactionManager` 빈을 직접 등록해 부트 자동 등록(`JpaTransactionManager`)을 대체한다 (`@ConditionalOnMissingBean`). 그래서 로그가 `DataSourceTransactionManager` 로 찍힌다 |
+
+</details>
+
+
+
+# 섹션 12 | 스프링 트랜잭션 전파2 - 활용
+
+<details>
+<summary><b>핵심 정리 펼쳐보기</b></summary>
+
+<br>
+
+> 회원 가입(`MemberRepository`)과 가입 이력 로그(`LogRepository`)를 함께 저장하는 예제로 트랜잭션을 어디에 거는지에 따라 결과가 어떻게 달라지는지 확인한다.
+> 핵심은 두 가지다. **`REQUIRED` 로 참여한 내부 트랜잭션에서 난 예외는 바깥에서 잡아도 전체 롤백을 막을 수 없다** (rollback-only 표시가 남기 때문). 일부만 롤백하려면 **`REQUIRES_NEW` 로 물리 트랜잭션을 분리**해야 한다.
+> (사용 버전: 스프링 부트 2.6.5 → 스프링 5.3.17, 부트가 자동 등록한 `JpaTransactionManager` 사용. 테스트마다 `@Transactional` 을 켜고 끄며 진행하므로 최종 코드에서는 앞선 시나리오 테스트 일부가 실패하는 것이 정상)
+
+### 한눈에 보기
+
+| 구분 | 내용 |
+|---|---|
+| 요구사항 1 | 회원 데이터가 변경되면 이력을 DB `LOG` 테이블에 남긴다 (예제는 가입 시에만) |
+| 요구사항 2 (변경) | **로그 저장에 실패하더라도 회원 가입은 유지되어야 한다** |
+| `joinV1()` | 회원 저장 → 로그 저장. 예외를 그대로 던짐 |
+| `joinV2()` | `joinV1()` 과 같지만 로그 저장 예외를 `try-catch` 로 잡아 정상 흐름으로 바꿈 |
+| 예외 재현 | username 에 `로그예외` 가 들어 있으면 `LogRepository.save()` 가 `RuntimeException` 을 던짐 |
+| 테스트 데이터 | 메모리 DB를 테스트 사이에 비우지 않으므로 테스트마다 username 을 다르게 준다 |
+
+### 시나리오별 결과 (`MemberServiceTest`)
+
+| 테스트 | Service | MemberRepo | LogRepo | 결과 | 확인할 로그 |
+|---|---|---|---|---|---|
+| `outerTxOff_success` | OFF | ON | ON | 둘 다 커밋 (트랜잭션 2개, 각각 신규) | 리포지토리마다 `Creating new transaction with name [...Repository.save]` |
+| `outerTxOff_fail` | OFF | ON | ON (예외) | **회원은 커밋, 로그만 롤백 → 정합성 깨짐** | member는 `Committing`, log는 `Rolling back` |
+| `singleTx` | ON | OFF | OFF | 하나의 트랜잭션으로 커밋 | `Creating new transaction` 은 `MemberService.joinV1` 에서 1번뿐 |
+| `outerTxOn_success` | ON | ON | ON | 전부 참여, 물리 커밋 1번 | 리포지토리에서 `Participating in existing transaction` |
+| `outerTxOn_fail` | ON | ON | ON (예외) | 전부 롤백, 클라이언트는 `RuntimeException` | 서비스까지 예외가 올라오므로 그냥 물리 롤백 (rollback-only 는 참고 안 함) |
+| `recoverException_fail` | ON (`joinV2`) | ON | ON (예외) | 전부 롤백 + **`UnexpectedRollbackException`** | `marking existing transaction as rollback-only` → `Global transaction is marked as rollback-only but transactional code requested commit` |
+| `recoverException_success` | ON (`joinV2`) | ON | `REQUIRES_NEW` (예외) | **회원 커밋, 로그만 롤백** | `Suspending current transaction, creating new transaction` → `Rolling back` → `Resuming suspended transaction` → 외부 `Committing` |
+
+### 트랜잭션을 거는 위치
+
+| 방식 | 장점 | 한계 |
+|---|---|---|
+| 리포지토리에만 | 리포지토리를 단독 호출해도 트랜잭션 적용 | 서비스 단위로 묶이지 않아 일부만 커밋될 수 있음 |
+| 서비스에만 (`singleTx`) | 논리·물리, rollback-only 같은 고민 없이 단순하게 하나로 묶임 | 리포지토리를 단독 호출하는 클라이언트(B, C)는 트랜잭션을 쓸 수 없음 |
+| 서비스 + 리포지토리 (`REQUIRED`) | 어디서 시작하든 필요한 범위로 묶임. **트랜잭션 전파가 필요한 이유** | 참여한 내부 트랜잭션의 롤백이 전체를 롤백시킴 |
+
+- 트랜잭션 전파가 없다면 "트랜잭션 있는 메서드"와 "없는 메서드"를 따로 만들어야 한다. `OrderService` 처럼 다른 서비스도 같은 리포지토리를 쓰면 경우의 수가 더 늘어난다.
+- JPA의 데이터 변경(등록·수정·삭제)에는 트랜잭션이 필요하다. 조회는 트랜잭션 없이도 된다.
+
+### 간단한 사용법
+
+```java
+// 실패하는 복구: REQUIRED 로 참여한 내부 트랜잭션의 예외를 잡아도 rollback-only 가 남는다
+@Transactional
+public void joinV2(String username) {
+    memberRepository.save(member);        // REQUIRED → 참여
+    try {
+        logRepository.save(logMessage);   // REQUIRED → 참여, 예외 시 rollback-only 표시
+    } catch (RuntimeException e) {
+        log.info("log 저장에 실패했습니다. logMessage={}", logMessage.getMessage());
+    }
+}   // 정상 흐름이라 커밋 요청 → rollback-only 확인 → 물리 롤백 + UnexpectedRollbackException
+```
+
+```java
+// 성공하는 복구: 로그 저장만 별도 물리 트랜잭션으로 분리
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void save(Log logMessage) { ... }
+```
+
+### 동작 원리
+
+| 단계 | `REQUIRED` (`recoverException_fail`) | `REQUIRES_NEW` (`recoverException_success`) |
+|---|---|---|
+| `LogRepository` 시작 | 기존 트랜잭션에 참여 (`isNewTransaction = false`) | 기존 트랜잭션 보류, 새 EntityManager·커넥션으로 신규 트랜잭션 |
+| 예외 발생 → AOP가 롤백 요청 | 신규가 아니므로 물리 롤백 대신 **rollback-only 표시** | 신규이므로 **물리 롤백**하고 끝. rollback-only 표시 없음 |
+| 예외 전파 | AOP가 예외를 다시 던짐 → `MemberService` 가 잡아서 정상 리턴 | 동일 |
+| `MemberService` 커밋 요청 | 신규라 물리 커밋 대상 → rollback-only 확인 → **물리 롤백 + `UnexpectedRollbackException`** | rollback-only 없음 → **물리 커밋** |
+| 결과 | 회원·로그 모두 없음 | 회원 저장, 로그 없음 |
+
+- `JpaTransactionManager` 는 rollback-only 를 `EntityManager` 의 `EntityTransaction` 과 `ConnectionHolder` 에 함께 표시한다 (`JpaTransactionObject#setRollbackOnly`). 로그는 `Setting JPA transaction on EntityManager [...] rollback-only`.
+- `REQUIRES_NEW` 쪽은 EntityManager도 따로 연다. 로그에서 `SessionImpl(...)` 번호가 외부와 다르다.
+
+### 주의사항
+
+| 주의 | 내용 |
+|---|---|
+| 예외를 잡아도 롤백된다 | `REQUIRED` 로 참여한 쪽에서 런타임 예외가 AOP를 통과하면 그 순간 rollback-only가 표시된다. 바깥에서 `try-catch` 로 잡는 건 너무 늦다. 실무에서 많이 하는 실수 |
+| `REQUIRES_NEW` 는 커넥션 2개 | 한 요청이 동시에 커넥션 2개를 쓴다. 성능이 중요한 곳에서는 주의 |
+| 구조 변경으로 대체 | 트랜잭션 밖의 상위 객체(facade 등)에서 `MemberService`(트랜잭션) 호출 후 `LogRepository`(별도 트랜잭션)를 순서대로 호출하면 커넥션을 동시에 2개 쓰지 않는다. 단순한 방법이 있으면 그쪽을 택하고, 구조상 `REQUIRES_NEW` 가 더 깔끔하면 그때 사용 |
+| JPA는 INSERT가 커밋 시점에 나간다 | `persist()` 는 쓰기 지연이라 `insert` SQL이 `Committing JPA transaction` 직후(flush)에 실행된다. 롤백된 로그는 시퀀스만 증가하고(`call next value`) `insert` 가 아예 실행되지 않는다 |
+| 주석과 실제 annotation 일치 | 테스트 위 주석(`@Transactional:ON/OFF`)대로 코드를 바꿔 가며 실행해야 한다. 기대와 다르면 `TransactionInterceptor` TRACE 로그의 `Getting transaction for [...]` 로 실제 AOP 적용 대상을 먼저 확인한다 |
+| 로그로 흐름 읽기 | `Creating new transaction with name [X]` 의 X가 물리 트랜잭션 시작점, `Participating in existing transaction` 은 참여. **기대한 로그가 빠진 곳**이 문제 지점이다 |
 
 </details>
